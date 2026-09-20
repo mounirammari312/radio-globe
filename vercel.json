@@ -1,0 +1,50 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "nextjs",
+  "installCommand": "bun install",
+  "buildCommand": "bun run prebuild && next build",
+  "devCommand": "next dev",
+  "functions": {
+    "src/app/api/stations/route.ts": {
+      "maxDuration": 10
+    },
+    "src/app/api/stations/search/route.ts": {
+      "maxDuration": 10
+    },
+    "src/app/api/click/route.ts": {
+      "maxDuration": 10
+    },
+    "src/app/api/countries/route.ts": {
+      "maxDuration": 10
+    },
+    "src/app/api/proxy/route.ts": {
+      "maxDuration": 25
+    }
+  },
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "s-maxage=86400, stale-while-revalidate=604800"
+        }
+      ]
+    },
+    {
+      "source": "/data/(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=604800, immutable"
+        }
+      ]
+    },
+    {
+      "source": "/ads.txt",
+      "headers": [
+        { "key": "Content-Type", "value": "text/plain" }
+      ]
+    }
+  ]
+}

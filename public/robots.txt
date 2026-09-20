@@ -1,0 +1,13 @@
+User-agent: *
+Allow: /
+
+# Block API routes from being indexed
+Disallow: /api/
+
+# Allow legal pages
+Allow: /privacy-policy$
+Allow: /terms$
+Allow: /about$
+Allow: /contact$
+
+Sitemap: https://radio-globe.example.com/sitemap.xml
