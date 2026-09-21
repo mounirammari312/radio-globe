@@ -1,8 +1,8 @@
 "use client";
 
-import { useRef, useEffect, useState, useMemo, useCallback } from "react";
+import { useRef, useEffect, useState } from "react";
 
-// Radio Garden's exact color palette (from their CSS variables):
+// Radio Garden's exact color palette:
 //   --color-map-background-rgb: 45,0,255  (deep blue/purple)
 //   --color-primary-rgb-bright: 0,224,112  (bright green)
 //   --color-primary-intense: rgb(0,255,130)
@@ -35,16 +35,28 @@ interface RadioGlobeProps {
   onCenterChange?: (lat: number, lng: number) => void;
 }
 
-// Build a minimal globe style — deep blue background + atmosphere + green dots
+// Esri World Imagery (satellite) — gives the realistic 3D earth look like Radio Garden
+// Free for non-commercial use, no API key required.
 const GLOBE_STYLE = {
   version: 8,
   sources: {
-    osm: {
+    esri: {
       type: "raster",
-      tiles: ["https://a.tile.openstreetmap.org/{z}/{x}/{y}.png"],
+      tiles: [
+        "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+      ],
       tileSize: 256,
       maxzoom: 19,
-      attribution: "© OpenStreetMap contributors",
+      attribution: "© Esri, Maxar, Earthstar Geographics",
+    },
+    esri_labels: {
+      type: "raster",
+      tiles: [
+        "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+      ],
+      tileSize: 256,
+      maxzoom: 19,
+      attribution: "© Esri",
     },
   },
   layers: [
@@ -52,19 +64,28 @@ const GLOBE_STYLE = {
       id: "background",
       type: "background",
       paint: {
-        "background-color": "rgb(20, 8, 60)",
+        "background-color": "rgb(8, 4, 30)",
       },
     },
     {
-      id: "osm-tiles",
+      id: "satellite",
       type: "raster",
-      source: "osm",
+      source: "esri",
       paint: {
-        "raster-opacity": 0.5,
-        "raster-saturation": -0.6,
-        "raster-contrast": 0.1,
-        "raster-brightness-min": 0.05,
-        "raster-brightness-max": 0.5,
+        // Slight darkening + saturation reduction for the radio.garden aesthetic
+        "raster-opacity": 0.85,
+        "raster-saturation": -0.3,
+        "raster-contrast": 0.05,
+        "raster-brightness-min": 0.1,
+        "raster-brightness-max": 0.85,
+      },
+    },
+    {
+      id: "labels",
+      type: "raster",
+      source: "esri_labels",
+      paint: {
+        "raster-opacity": 0.6,
       },
     },
   ],
@@ -83,12 +104,14 @@ export default function RadioGlobe({
   const [autoRotate, setAutoRotate] = useState(true);
   const rotateRef = useRef<number | null>(null);
 
-  // Initialize the map once (lazy-load maplibre-gl on the client to bypass Turbopack)
+  // Initialize the map once — lazy-load maplibre-gl on the client (bypasses SSR/bundler issues)
   useEffect(() => {
     if (!mapContainer.current || mapRef.current) return;
 
     let cancelled = false;
     let map: any = null;
+    let stopTimer: any = null;
+    let resizeObserver: any = null;
 
     // Lazy-load maplibre-gl + its CSS dynamically (client-only, no SSR)
     Promise.all([
@@ -98,23 +121,30 @@ export default function RadioGlobe({
       if (cancelled || !mapContainer.current) return;
       const maplibregl = (mod as any).default || mod;
 
-      map = new maplibregl.Map({
-        container: mapContainer.current,
-        style: GLOBE_STYLE as any,
-        center: [10, 25],
-        zoom: 1.5,
-        minZoom: 1,
-        maxZoom: 12,
-        maxPitch: 60,
-        pitch: 0,
-        attributionControl: false,
-        dragRotate: true,
-        dragPan: true,
-        scrollZoom: true,
-        touchZoomRotate: true,
-        projection: { type: "globe" } as any,
-        antialias: true,
-      });
+      try {
+        map = new maplibregl.Map({
+          container: mapContainer.current,
+          style: GLOBE_STYLE as any,
+          center: [10, 25],
+          zoom: 1.8,
+          minZoom: 1,
+          maxZoom: 12,
+          maxPitch: 60,
+          pitch: 0,
+          attributionControl: false,
+          dragRotate: true,
+          dragPan: true,
+          scrollZoom: true,
+          touchZoomRotate: true,
+          // 3D GLOBE PROJECTION — the key feature that makes us Radio Garden
+          // Supported in maplibre-gl v5.0.0+
+          projection: { type: "globe" } as any,
+          antialias: true,
+        });
+      } catch (err) {
+        console.error("MapLibre init failed:", err);
+        return;
+      }
 
       mapRef.current = map;
 
@@ -130,13 +160,42 @@ export default function RadioGlobe({
             "fog-ground-blend": 0.5,
           });
         } catch {
-          // setSky may not exist on all maplibre versions — non-fatal
+          // setSky may not exist — non-fatal
         }
+
+        // Set globe projection explicitly (some versions need this after load)
+        try {
+          map.setProjection({ type: "globe" } as any);
+        } catch {
+          // ignore — already set in constructor
+        }
+
+        // Force the map to fill the container
+        try {
+          map.resize();
+        } catch {}
+
         setReady(true);
       });
 
+      // Re-resize on window resize
+      const handleResize = () => {
+        if (map && !cancelled) {
+          try {
+            map.resize();
+          } catch {}
+        }
+      };
+      window.addEventListener("resize", handleResize);
+      const initialResize = setTimeout(handleResize, 100);
+
+      // Use ResizeObserver for layout changes (e.g. sidebar opening)
+      if (typeof ResizeObserver !== "undefined" && mapContainer.current) {
+        resizeObserver = new ResizeObserver(() => handleResize());
+        resizeObserver.observe(mapContainer.current);
+      }
+
       // Stop autorotate after the user interacts
-      let stopTimer: any = null;
       const stopRotate = () => {
         if (autoRotate) {
           setAutoRotate(false);
@@ -149,7 +208,6 @@ export default function RadioGlobe({
       map.on("rotatestart", stopRotate);
       map.on("pitchstart", stopRotate);
 
-      // Notify on center change for finding nearby places
       map.on("moveend", () => {
         const center = map.getCenter();
         onCenterChange?.(center.lat, center.lng);
@@ -158,7 +216,10 @@ export default function RadioGlobe({
 
     return () => {
       cancelled = true;
+      window.removeEventListener("resize", handleResize as any);
+      clearTimeout(initialResize as any);
       if (stopTimer) clearTimeout(stopTimer);
+      if (resizeObserver) resizeObserver.disconnect();
       if (rotateRef.current) cancelAnimationFrame(rotateRef.current);
       markersRef.current.forEach((m) => m.remove());
       markersRef.current = [];
@@ -187,8 +248,8 @@ export default function RadioGlobe({
       const map = mapRef.current;
       if (map) {
         const center = map.getCenter();
-        // Slow eastward rotation: 6 deg/sec
-        let newLng = center.lng + dt * 6;
+        // Slow eastward rotation: 5 deg/sec
+        let newLng = center.lng + dt * 5;
         if (newLng > 180) newLng -= 360;
         map.setCenter({ lng: newLng, lat: center.lat }, { animate: false });
       }
@@ -206,7 +267,6 @@ export default function RadioGlobe({
   useEffect(() => {
     if (!ready || !mapRef.current) return;
 
-    // Need to re-import maplibre-gl for the Marker + Popup classes
     let cancelled = false;
     import("maplibre-gl").then((mod) => {
       if (cancelled || !mapRef.current) return;
@@ -214,11 +274,10 @@ export default function RadioGlobe({
       const map = mapRef.current;
 
       // Clear existing markers
-      markersRef.current.forEach((m: any) => m.remove());
+      markersRef.current.forEach((m) => m.remove());
       markersRef.current = [];
 
-      // Create a green dot DOM element for each place
-      // We cap markers at 3000 to keep DOM performance reasonable
+      // Cap markers at 3000 for performance
       const maxMarkers = 3000;
       const placesToShow = places.slice(0, maxMarkers);
 
@@ -280,30 +339,97 @@ export default function RadioGlobe({
       duration: 1200,
       essential: true,
     });
-    // Use a small delay to defer the setState (avoid cascading renders)
     const t = setTimeout(() => setAutoRotate(false), 0);
     return () => clearTimeout(t);
   }, [activePlaceId, places, ready]);
 
   return (
-    <div className="relative w-full h-full">
+    <div
+      style={{
+        position: "absolute",
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        width: "100%",
+        height: "100%",
+      }}
+    >
       {/* Crosshair in the center — gives the "tuning" feel like Radio Garden */}
-      <div className="pointer-events-none absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-10 opacity-50">
-        <div className="relative w-10 h-10">
-          <div className="absolute top-1/2 left-0 right-0 h-px bg-emerald-400 -translate-y-1/2" />
-          <div className="absolute left-1/2 top-0 bottom-0 w-px bg-emerald-400 -translate-x-1/2" />
-          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-2 h-2 border border-emerald-400 rounded-full" />
+      <div
+        style={{
+          position: "absolute",
+          top: "50%",
+          left: "50%",
+          transform: "translate(-50%, -50%)",
+          zIndex: 10,
+          pointerEvents: "none",
+          opacity: 0.5,
+        }}
+      >
+        <div style={{ position: "relative", width: 40, height: 40 }}>
+          <div
+            style={{
+              position: "absolute",
+              top: "50%",
+              left: 0,
+              right: 0,
+              height: 1,
+              background: "rgb(52, 211, 153)",
+              transform: "translateY(-50%)",
+            }}
+          />
+          <div
+            style={{
+              position: "absolute",
+              left: "50%",
+              top: 0,
+              bottom: 0,
+              width: 1,
+              background: "rgb(52, 211, 153)",
+              transform: "translateX(-50%)",
+            }}
+          />
+          <div
+            style={{
+              position: "absolute",
+              top: "50%",
+              left: "50%",
+              transform: "translate(-50%, -50%)",
+              width: 8,
+              height: 8,
+              border: "1px solid rgb(52, 211, 153)",
+              borderRadius: "50%",
+            }}
+          />
         </div>
       </div>
 
-      <div ref={mapContainer} className="absolute inset-0 maplibre-globe-bg" />
+      <div
+        ref={mapContainer}
+        className="maplibre-globe-bg"
+        style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          width: "100%",
+          height: "100%",
+        }}
+      />
 
       {/* Atmosphere glow overlay */}
       <div
-        className="pointer-events-none absolute inset-0"
         style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          pointerEvents: "none",
           background:
-            "radial-gradient(circle at center, transparent 50%, rgba(8, 4, 30, 0.4) 100%)",
+            "radial-gradient(circle at center, transparent 55%, rgba(8, 4, 30, 0.5) 100%)",
         }}
       />
     </div>

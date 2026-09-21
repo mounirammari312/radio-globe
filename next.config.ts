@@ -6,6 +6,8 @@ const nextConfig: NextConfig = {
     ignoreBuildErrors: true,
   },
   reactStrictMode: false,
+  // Transpile maplibre-gl ESM (avoids "module is not defined" errors in production build)
+  transpilePackages: ["maplibre-gl"],
   experimental: {
     optimizePackageImports: ["lucide-react", "recharts"],
   },

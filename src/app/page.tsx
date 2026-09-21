@@ -1,13 +1,31 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import RadioGlobe, { type Place } from "@/components/radio/radio-globe";
+import dynamic from "next/dynamic";
+import type { Place } from "@/components/radio/radio-globe";
 import NowPlayingBar from "@/components/radio/now-playing-bar";
 import SearchPanel from "@/components/radio/search-panel";
 import Header from "@/components/radio/header";
 import AdContainer from "@/components/ads/ad-container";
 import { useRadioStore, type StationMeta } from "@/store/radio-store";
 import { Loader2, Radio as RadioIcon } from "lucide-react";
+
+// CRITICAL: Load RadioGlobe client-only to avoid Turbopack/SSR issues with maplibre-gl.
+// maplibre-gl uses browser-only APIs (WebGL, window) that fail during SSR.
+// `ssr: false` makes the bundle skip the component entirely on the server.
+const RadioGlobe = dynamic(
+  () => import("@/components/radio/radio-globe").then((m) => m.default),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex flex-col items-center justify-center h-full text-white/70">
+        <Loader2 className="w-12 h-12 animate-spin text-emerald-400 mb-4" />
+        <div className="text-lg font-medium mb-1">Loading 3D globe…</div>
+        <div className="text-sm text-white/40">Initializing globe projection</div>
+      </div>
+    ),
+  }
+);
 
 export default function Home() {
   const [places, setPlaces] = useState<Place[]>([]);
