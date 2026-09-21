@@ -53,8 +53,6 @@ tool-results/
 # upload folder
 upload/
 
-# Generated data files — built by scripts/build-places.ts during prebuild
-# These are regenerated on every Vercel deploy (always fresh)
-public/data/places.json
-public/data/stations.json
-public/data/countries.json
+# Note: public/data/*.json are NOT git-ignored — they must be committed
+# so the app works on Vercel even without re-running the prebuild script.
+# To refresh the data, run `bun run build:data` and commit the updated files.
