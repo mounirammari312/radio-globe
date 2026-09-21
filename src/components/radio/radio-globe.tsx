@@ -57,7 +57,7 @@ const GLOBE_STYLE = {
       id: "background",
       type: "background",
       paint: {
-        "background-color": "rgb(25, 5, 195)", // خلفية الفضاء الأصلية لـ Radio Garden
+        "background-color": "rgb(25, 5, 195)",
       },
     },
     {
@@ -90,10 +90,12 @@ export default function RadioGlobe({
   const mapRef = useRef<any>(null);
   const hoverPopupRef = useRef<any>(null);
   const [ready, setReady] = useState(false);
-  const [autoRotate, setAutoRotate] = useState(true);
+
+  // مرجع متزامن وفوري للتحكم في توقف الدوران بمجرد ملامسة الشاشة
+  const isInteractingRef = useRef<boolean>(false);
+  const stopTimerRef = useRef<any>(null);
   const rotateRef = useRef<number | null>(null);
 
-  // تحويل مصفوفة الأماكن إلى كائن GeoJSON عالي السرعة لكرت الشاشة
   const geojsonData = useMemo(() => {
     return {
       type: "FeatureCollection",
@@ -119,7 +121,6 @@ export default function RadioGlobe({
 
     let cancelled = false;
     let map: any = null;
-    let stopTimer: any = null;
     let resizeObserver: any = null;
 
     Promise.all([
@@ -140,10 +141,12 @@ export default function RadioGlobe({
           maxPitch: 60,
           pitch: 0,
           attributionControl: false,
+          // تفعيل كافة متحكمات اللمس والسحب بإحكام
           dragRotate: true,
           dragPan: true,
           scrollZoom: true,
           touchZoomRotate: true,
+          touchPitch: false,
           projection: { type: "globe" } as any,
           canvasContextAttributes: { antialias: true, powerPreference: "high-performance" },
         });
@@ -154,7 +157,6 @@ export default function RadioGlobe({
 
       mapRef.current = map;
 
-      // إنشاء نافذة منبثقة عائمة واحدة يُعاد استخدامها برمجياً دون إثقال الـ DOM
       const hoverPopup = new maplibregl.Popup({
         closeButton: false,
         closeOnClick: false,
@@ -163,7 +165,6 @@ export default function RadioGlobe({
       hoverPopupRef.current = hoverPopup;
 
       map.on("load", () => {
-        // تفعيل الغلاف الجوي والضباب الفضائي
         try {
           map.setSky({
             "sky-color": "rgb(8, 4, 30)",
@@ -179,13 +180,12 @@ export default function RadioGlobe({
           map.setProjection({ type: "globe" } as any);
         } catch {}
 
-        // تغذية معالج الرسوميات GPU ببيانات المحطات دفعة واحدة
+        // طبقة النقاط على كرت الشاشة
         map.addSource("radio-places", {
           type: "geojson",
           data: geojsonData,
         });
 
-        // طبقة النقاط الخضراء الفسفورية الأصلية
         map.addLayer({
           id: "radio-dots",
           type: "circle",
@@ -195,12 +195,9 @@ export default function RadioGlobe({
               "interpolate",
               ["linear"],
               ["zoom"],
-              1.5,
-              2.0, // نقطة ناعمة عند البعد الكامل
-              4,
-              3.8,
-              8,
-              7.5,
+              1.5, 2.0,
+              4, 3.8,
+              8, 7.5,
             ],
             "circle-color": "rgb(0, 224, 112)",
             "circle-opacity": 0.95,
@@ -209,7 +206,7 @@ export default function RadioGlobe({
           },
         });
 
-        // إظهار النافذة المنبثقة الأنيقة عند التمرير بالماوس فوق أي نقطة
+        // النوافذ المنبثقة عند التمرير
         map.on("mouseenter", "radio-dots", (e: any) => {
           map.getCanvas().style.cursor = "pointer";
           if (!e.features || !e.features[0]) return;
@@ -233,7 +230,6 @@ export default function RadioGlobe({
           hoverPopup.remove();
         });
 
-        // النقر واختيار المحطة
         map.on("click", "radio-dots", (e: any) => {
           if (!e.features || !e.features[0]) return;
           const raw = e.features[0].properties.raw;
@@ -250,7 +246,36 @@ export default function RadioGlobe({
         setReady(true);
       });
 
-      // الحفاظ على مراقبة أبعاد الشاشة لضمان عدم تشوه الكرة عند فتح الشريط الجانبي
+      // إيقاف الدوران فوراً لحظة ملامسة الشاشة
+      const onUserTouchStart = () => {
+        isInteractingRef.current = true;
+        if (stopTimerRef.current) clearTimeout(stopTimerRef.current);
+      };
+
+      // استئناف الدوران بعد 10 ثوانٍ من ترك الشاشة
+      const onUserTouchEnd = () => {
+        if (stopTimerRef.current) clearTimeout(stopTimerRef.current);
+        stopTimerRef.current = setTimeout(() => {
+          isInteractingRef.current = false;
+        }, 10000);
+      };
+
+      const canvas = map.getCanvas();
+      canvas.addEventListener("touchstart", onUserTouchStart, { passive: true });
+      canvas.addEventListener("touchend", onUserTouchEnd, { passive: true });
+      canvas.addEventListener("mousedown", onUserTouchStart);
+      canvas.addEventListener("mouseup", onUserTouchEnd);
+
+      map.on("dragstart", onUserTouchStart);
+      map.on("dragend", onUserTouchEnd);
+      map.on("zoomstart", onUserTouchStart);
+      map.on("zoomend", onUserTouchEnd);
+
+      map.on("moveend", () => {
+        const center = map.getCenter();
+        onCenterChange?.(center.lat, center.lng);
+      });
+
       const handleResize = () => {
         if (map && !cancelled) {
           try {
@@ -260,35 +285,16 @@ export default function RadioGlobe({
       };
 
       window.addEventListener("resize", handleResize);
-      const initialResize = setTimeout(handleResize, 100);
-
       if (typeof ResizeObserver !== "undefined" && mapContainer.current) {
         resizeObserver = new ResizeObserver(() => handleResize());
         resizeObserver.observe(mapContainer.current);
       }
-
-      // إيقاف الدوران التلقائي مؤقتاً عند تفاعل المستخدم
-      const stopRotate = () => {
-        setAutoRotate(false);
-        if (stopTimer) clearTimeout(stopTimer);
-        stopTimer = setTimeout(() => setAutoRotate(true), 12000);
-      };
-
-      map.on("dragstart", stopRotate);
-      map.on("zoomstart", stopRotate);
-      map.on("rotatestart", stopRotate);
-      map.on("pitchstart", stopRotate);
-
-      map.on("moveend", () => {
-        const center = map.getCenter();
-        onCenterChange?.(center.lat, center.lng);
-      });
     });
 
     return () => {
       cancelled = true;
       window.removeEventListener("resize", () => {});
-      if (stopTimer) clearTimeout(stopTimer);
+      if (stopTimerRef.current) clearTimeout(stopTimerRef.current);
       if (resizeObserver) resizeObserver.disconnect();
       if (rotateRef.current) cancelAnimationFrame(rotateRef.current);
       if (hoverPopupRef.current) hoverPopupRef.current.remove();
@@ -299,7 +305,7 @@ export default function RadioGlobe({
     };
   }, []);
 
-  // تحديث مصدر بيانات الـ GPU فوراً عند تغير قائمة الأماكن
+  // تحديث نقاط الـ GPU
   useEffect(() => {
     if (!ready || !mapRef.current) return;
     const source = mapRef.current.getSource("radio-places");
@@ -308,70 +314,139 @@ export default function RadioGlobe({
     }
   }, [geojsonData, ready]);
 
-  // الدوران التلقائي السلس
+  // حلقة الدوران التلقائي: تفحص المرجع الفوري (isInteractingRef) قبل كل إطار
   useEffect(() => {
     if (!ready || !mapRef.current) return;
-    if (!autoRotate) {
-      if (rotateRef.current) {
-        cancelAnimationFrame(rotateRef.current);
-        rotateRef.current = null;
-      }
-      return;
-    }
 
     let last = performance.now();
     const rotateLoop = (now: number) => {
       const dt = (now - last) / 1000;
       last = now;
-      const map = mapRef.current;
-      if (map && !map.isMoving()) {
+
+      // إذا كان المستخدم يلمس الشاشة، لا نحرك الخريطة برمجياً إطلاقاً
+      if (!isInteractingRef.current && mapRef.current) {
+        const map = mapRef.current;
         const center = map.getCenter();
         let newLng = center.lng + dt * 4;
         if (newLng > 180) newLng -= 360;
         map.setCenter({ lng: newLng, lat: center.lat }, { animate: false });
       }
+
       rotateRef.current = requestAnimationFrame(rotateLoop);
     };
+
     rotateRef.current = requestAnimationFrame(rotateLoop);
 
     return () => {
       if (rotateRef.current) cancelAnimationFrame(rotateRef.current);
       rotateRef.current = null;
     };
-  }, [ready, autoRotate]);
+  }, [ready]);
 
-  // الطيران إلى المحطة المختارة
+  // الطيران إلى المحطة عند الاختيار
   useEffect(() => {
     if (!ready || !mapRef.current || !activePlaceId) return;
     const place = places.find((p) => p.id === activePlaceId);
     if (!place) return;
+    
+    isInteractingRef.current = true;
     mapRef.current.flyTo({
       center: [place.lng, place.lat],
       zoom: 4.5,
       duration: 1200,
       essential: true,
     });
-    setAutoRotate(false);
   }, [activePlaceId, places, ready]);
 
   return (
-    <div className="absolute inset-0 w-full h-full overflow-hidden bg-[rgb(8,4,30)]">
-      {/* مؤشر التنشين الأصلي الخاص بـ Radio Garden */}
-      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-10 pointer-events-none opacity-80">
-        <div className="relative w-10 h-10">
-          <div className="absolute top-1/2 left-0 right-0 h-[1px] bg-emerald-400 -translate-y-1/2" />
-          <div className="absolute left-1/2 top-0 bottom-0 w-[1px] bg-emerald-400 -translate-x-1/2" />
-          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-2.5 h-2.5 border border-emerald-400 rounded-full" />
+    <div
+      style={{
+        position: "absolute",
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        width: "100%",
+        height: "100%",
+        overflow: "hidden",
+        backgroundColor: "rgb(8, 4, 30)",
+        touchAction: "none", // منع متصفح الهاتف من اعتراض إيماءات اللمس
+      }}
+    >
+      {/* مؤشر التنشين مع تعطيل التفاعل بالماوس بشكل صريح */}
+      <div
+        style={{
+          position: "absolute",
+          top: "50%",
+          left: "50%",
+          transform: "translate(-50%, -50%)",
+          zIndex: 10,
+          pointerEvents: "none",
+          opacity: 0.8,
+        }}
+      >
+        <div style={{ position: "relative", width: 40, height: 40 }}>
+          <div
+            style={{
+              position: "absolute",
+              top: "50%",
+              left: 0,
+              right: 0,
+              height: 1,
+              backgroundColor: "rgb(52, 211, 153)",
+              transform: "translateY(-50%)",
+            }}
+          />
+          <div
+            style={{
+              position: "absolute",
+              left: "50%",
+              top: 0,
+              bottom: 0,
+              width: 1,
+              backgroundColor: "rgb(52, 211, 153)",
+              transform: "translateX(-50%)",
+            }}
+          />
+          <div
+            style={{
+              position: "absolute",
+              top: "50%",
+              left: "50%",
+              transform: "translate(-50%, -50%)",
+              width: 10,
+              height: 10,
+              border: "1px solid rgb(52, 211, 153)",
+              borderRadius: "50%",
+            }}
+          />
         </div>
       </div>
 
-      {/* حاوية الخريطة ثلاثية الأبعاد */}
-      <div ref={mapContainer} className="absolute inset-0 w-full h-full" />
-
-      {/* تدرج الغلاف الجوي الكوني المحيط */}
+      {/* حاوية الخريطة ثلاثية الأبعاد - تسمح بمرور اللمس بالكامل */}
       <div
-        className="absolute inset-0 pointer-events-none"
+        ref={mapContainer}
         style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          width: "100%",
+          height: "100%",
+          touchAction: "none",
+        }}
+      />
+
+      {/* الغلاف الجوي الكوني مع تعطيل تفاعل اللمس حتى لا يحجب الخريطة */}
+      <div
+        style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          pointerEvents: "none",
           background:
             "radial-gradient(circle at center, transparent 55%, rgba(8, 4, 30, 0.55) 100%)",
         }}
