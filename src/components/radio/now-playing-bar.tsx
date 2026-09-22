@@ -1,7 +1,7 @@
 
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useRadioStore, type StationMeta } from "@/store/radio-store";
 import type { Place } from "@/components/radio/radio-globe";
 import {
@@ -28,6 +28,16 @@ interface NowPlayingBarProps {
   onOpenSearch: () => void;
 }
 
+interface WeatherInfo {
+  temp: number;
+  condition: string;
+  isDay: boolean;
+  icon: string;
+}
+
+// ذاكرة تخزين مؤقتة للطقس لمنع تكرار الطلبات عند التنقل بين نفس المدن
+const weatherCache = new Map<string, { data: WeatherInfo; timestamp: number }>();
+
 export default function NowPlayingBar({
   activePlace,
   places,
@@ -48,21 +58,98 @@ export default function NowPlayingBar({
   const [expanded, setExpanded] = useState(false);
   const [activeTab, setActiveTab] = useState<"globe" | "fav" | "explore" | "search" | "settings">("globe");
 
-  // حساب التوقيت المحلي اللحظي بناءً على خط الطول الجغرافي
+  // حالات الطقس والمسافة الجغرافية
+  const [weather, setWeather] = useState<WeatherInfo | null>(null);
+  const [distanceKm, setDistanceKm] = useState<number | null>(null);
+
+  const lat = activePlace ? activePlace.lat : currentStation ? currentStation.lat : undefined;
+  const lng = activePlace ? activePlace.lng : currentStation ? currentStation.lng : undefined;
+
+  // 1. حساب التوقيت المحلي اللحظي بناءً على خط الطول الفلكي
   const localTime = useMemo(() => {
-    const lng = activePlace ? activePlace.lng : currentStation ? currentStation.lng : 0;
+    const targetLng = lng ?? 0;
     const now = new Date();
     const utc = now.getTime() + now.getTimezoneOffset() * 60000;
-    const offsetHours = Math.round(lng / 15);
+    const offsetHours = Math.round(targetLng / 15);
     const target = new Date(utc + 3600000 * offsetHours);
     const hh = String(target.getHours()).padStart(2, "0");
     const mm = String(target.getMinutes()).padStart(2, "0");
     return `${hh}:${mm}`;
-  }, [activePlace, currentStation]);
+  }, [lng]);
+
+  // 2. جلب بيانات الطقس الحية من Open-Meteo بخفة وسرعة فائقة
+  useEffect(() => {
+    if (lat === undefined || lng === undefined) {
+      setWeather(null);
+      return;
+    }
+
+    const cacheKey = `${lat.toFixed(2)},${lng.toFixed(2)}`;
+    const cached = weatherCache.get(cacheKey);
+
+    if (cached && Date.now() - cached.timestamp < 15 * 60 * 1000) {
+      setWeather(cached.data);
+      return;
+    }
+
+    let isCancelled = false;
+
+    async function fetchWeather() {
+      try {
+        const res = await fetch(
+          `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&current=temperature_2m,weather_code,is_day`
+        );
+        if (!res.ok) return;
+        const data = await res.json();
+        if (isCancelled || !data.current) return;
+
+        const code = data.current.weather_code;
+        const isDay = Boolean(data.current.is_day);
+        const temp = Math.round(data.current.temperature_2m);
+
+        const parsed: WeatherInfo = {
+          temp,
+          isDay,
+          condition: getWeatherDescFr(code),
+          icon: getWeatherIcon(code, isDay),
+        };
+
+        weatherCache.set(cacheKey, { data: parsed, timestamp: Date.now() });
+        setWeather(parsed);
+      } catch (e) {
+        // حماية التطبيق من أي انقطاع في الشبكة
+      }
+    }
+
+    fetchWeather();
+    return () => {
+      isCancelled = true;
+    };
+  }, [lat, lng]);
+
+  // 3. حساب المسافة الرادارية بين المستمع والمحطة
+  useEffect(() => {
+    if (lat === undefined || lng === undefined) return;
+
+    if (typeof navigator !== "undefined" && navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const d = calculateDistance(pos.coords.latitude, pos.coords.longitude, lat, lng);
+          setDistanceKm(Math.round(d));
+        },
+        () => {
+          // موقع مرجعي افتراضي عند تعذر تحديد الموقع
+          const d = calculateDistance(36.75, 3.05, lat, lng);
+          setDistanceKm(Math.round(d));
+        },
+        { timeout: 4000 }
+      );
+    }
+  }, [lat, lng]);
 
   const isFav = currentStation ? favorites.some((f) => f.id === currentStation.id) : false;
 
-  // الانتقال للمحطة التالية عشوائياً أو داخل نفس المدينة
+  // الانتقال للمحطة التالية
   const handleNext = () => {
     if (places.length === 0) return;
     const nextIdx = Math.floor(Math.random() * places.length);
@@ -70,12 +157,18 @@ export default function NowPlayingBar({
   };
 
   const handleShare = () => {
+    const url = new URL(window.location.origin);
+    const stationId = currentStation?.id || activePlace?.id;
+    if (stationId) url.searchParams.set("station", stationId);
+
     if (navigator.share && currentStation) {
       navigator.share({
         title: `Radio Garden - ${currentStation.name}`,
         text: `Écoutez ${currentStation.name} en direct!`,
-        url: window.location.href,
+        url: url.toString(),
       });
+    } else if (navigator.clipboard) {
+      navigator.clipboard.writeText(url.toString());
     }
   };
 
@@ -84,7 +177,7 @@ export default function NowPlayingBar({
       {/* هيكل الدرج السفلي Glassmorphism */}
       <div
         className={`pointer-events-auto w-full max-w-lg mx-auto bg-[#10141d]/95 backdrop-blur-2xl border-t border-white/10 rounded-t-[24px] shadow-[0_-10px_40px_rgba(0,0,0,0.85)] text-white transition-all duration-300 ease-out flex flex-col ${
-          expanded ? "max-h-[82vh] h-[82vh]" : "max-h-[200px]"
+          expanded ? "max-h-[85vh] h-[85vh]" : "max-h-[200px]"
         }`}
       >
         {/* مقبض السحب العلوي */}
@@ -95,13 +188,13 @@ export default function NowPlayingBar({
           <div className="w-10 h-1 bg-white/30 rounded-full hover:bg-white/50 transition-colors" />
         </div>
 
-        {/* 1. صف المدينة والتوقيت المحلي (طابق الأصل 100%) */}
+        {/* 1. صف المدينة، شارة الطقس المصغرة، والتوقيت المحلي */}
         <div className="px-5 py-2 flex items-center justify-between border-b border-white/5">
           <div
             className="flex items-center gap-3 cursor-pointer flex-1 min-w-0"
             onClick={() => setExpanded(!expanded)}
           >
-            {/* فقاعة العدد البيضاء */}
+            {/* فقاعة العدد البيضاء الأصلية */}
             <div className="w-9 h-9 rounded-full bg-white text-black font-extrabold text-sm flex items-center justify-center flex-shrink-0 shadow-md">
               {activePlace?.stationCount || 1}
             </div>
@@ -117,16 +210,39 @@ export default function NowPlayingBar({
             </div>
           </div>
 
-          <div className="text-base font-semibold text-white/90 pl-3 font-mono">
-            {localTime}
+          {/* شارات الطقس والتوقيت الأنيقة في الزاوية المقابلة */}
+          <div className="flex items-center gap-2 pl-3 flex-shrink-0">
+            {weather && (
+              <div
+                className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-white/[0.06] border border-white/10 text-xs font-mono font-bold text-white/90 shadow-inner"
+                title={weather.condition}
+              >
+                <span>{weather.icon}</span>
+                <span>{weather.temp}°C</span>
+              </div>
+            )}
+            <div className="text-sm font-semibold text-white/90 font-mono tracking-tight flex items-center gap-1">
+              <span className="text-xs opacity-60">{weather?.isDay ? "☀️" : "🌙"}</span>
+              <span>{localTime}</span>
+            </div>
           </div>
         </div>
 
-        {/* 2. شريط تشغيل الإذاعة النشطة (الأخضر الفسفوري + زر الحلقة المتقطعة) */}
+        {/* 2. شريط تشغيل الإذاعة النشطة ومحلل الصوت النبضي */}
         <div className="px-5 py-2.5 flex items-center justify-between gap-3">
           <div className="flex-1 min-w-0">
-            <div className="font-bold text-[15px] truncate text-[#00e070] tracking-tight">
-              {currentStation?.name || "Prêt à écouter"}
+            <div className="flex items-center gap-2">
+              <div className="font-bold text-[15px] truncate text-[#00e070] tracking-tight">
+                {currentStation?.name || "Prêt à écouter"}
+              </div>
+              {/* محلل الطيف الصوتي المصغر */}
+              {isPlaying && (
+                <div className="flex items-end gap-[2px] h-3 shrink-0">
+                  <span className="w-[2.5px] bg-[#00e070] rounded-full animate-[pulse_0.5s_ease-in-out_infinite] h-full" />
+                  <span className="w-[2.5px] bg-[#00e070] rounded-full animate-[pulse_0.8s_ease-in-out_infinite] h-2/3" />
+                  <span className="w-[2.5px] bg-[#00e070] rounded-full animate-[pulse_0.4s_ease-in-out_infinite] h-4/5" />
+                </div>
+              )}
             </div>
             <div className="text-xs text-white/50 truncate mt-0.5">
               {error ? (
@@ -169,8 +285,49 @@ export default function NowPlayingBar({
         {/* 3. الجزء القابل للتوسيع (عند سحب الدرج للأعلى) */}
         {expanded && (
           <div className="flex-1 overflow-y-auto px-5 py-2 divide-y divide-white/10 space-y-3">
+            
+            {/* بطاقة القياسات الفضائية الحية للمدينة (Telemetry HUD Dossier) */}
+            <div className="pt-1 pb-2">
+              <div className="flex items-center gap-2 mb-2 text-[11px] font-mono text-[#00e070] tracking-wider uppercase font-bold">
+                <span className="w-1.5 h-1.5 rounded-full bg-[#00e070] animate-ping" />
+                <span>Données orbitales • En direct</span>
+              </div>
+              <div className="grid grid-cols-2 gap-2 text-center">
+                <div className="bg-white/[0.04] border border-white/5 p-2.5 rounded-xl">
+                  <div className="text-[10px] text-white/40 uppercase font-mono">Météo actuelle</div>
+                  <div className="text-xs font-bold text-white/90 flex items-center justify-center gap-1 mt-0.5">
+                    <span>{weather ? `${weather.icon} ${weather.temp}°C` : "--"}</span>
+                    <span className="text-[10px] font-normal text-white/50 truncate max-w-[80px]">
+                      {weather?.condition}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="bg-white/[0.04] border border-white/5 p-2.5 rounded-xl">
+                  <div className="text-[10px] text-white/40 uppercase font-mono">Distance de vous</div>
+                  <div className="text-xs font-mono font-bold text-[#00e070] mt-0.5">
+                    {distanceKm ? `${distanceKm.toLocaleString()} km` : "Calcul..."}
+                  </div>
+                </div>
+
+                <div className="bg-white/[0.04] border border-white/5 p-2.5 rounded-xl">
+                  <div className="text-[10px] text-white/40 uppercase font-mono">Coordonnées</div>
+                  <div className="text-xs font-mono text-white/80 mt-0.5">
+                    {lat !== undefined && lng !== undefined ? `${lat.toFixed(1)}°, ${lng.toFixed(1)}°` : "--"}
+                  </div>
+                </div>
+
+                <div className="bg-white/[0.04] border border-white/5 p-2.5 rounded-xl">
+                  <div className="text-[10px] text-white/40 uppercase font-mono">Cycle solaire</div>
+                  <div className="text-xs font-mono font-bold text-white/90 mt-0.5">
+                    {weather?.isDay ? "Journée ☀️" : "Nuit étoilée 🌙"}
+                  </div>
+                </div>
+              </div>
+            </div>
+
             {activeTab === "settings" ? (
-              /* شاشة الإعدادات المطابقة للصورة 170853.jpg */
+              /* شاشة الإعدادات الأصلية بالكامل */
               <div className="space-y-4 pt-2">
                 <div className="font-bold text-lg text-white">Réglages</div>
                 <div className="space-y-2 text-sm text-white/80">
@@ -198,7 +355,7 @@ export default function NowPlayingBar({
                 </div>
               </div>
             ) : (
-              /* قائمة الإجراءات والمحطات المطابقة للصورة 170840.jpg */
+              /* قائمة الإجراءات والمحطات الأصلية بالكامل */
               <div className="space-y-3 pt-2">
                 <button
                   onClick={handleShare}
@@ -293,4 +450,43 @@ export default function NowPlayingBar({
       </div>
     </div>
   );
+}
+
+// دالة حساب المسافة الفلكية الدقيقة بالـ Haversine
+function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371; // نصف قطر الأرض بالكيلومتر
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+// ترجمة الرموز المناخية بالفرنسية المطابقة لتطبيقك
+function getWeatherDescFr(code: number): string {
+  if (code === 0) return "Ciel dégagé";
+  if (code === 1 || code === 2) return "Partiellement nuageux";
+  if (code === 3) return "Couvert";
+  if ([45, 48].includes(code)) return "Brouillard";
+  if ([51, 53, 55, 61, 63, 65].includes(code)) return "Pluie";
+  if ([71, 73, 75, 77].includes(code)) return "Chute de neige";
+  if ([80, 81, 82].includes(code)) return "Averses";
+  if ([95, 96, 99].includes(code)) return "Orages";
+  return "Tempéré";
+}
+
+function getWeatherIcon(code: number, isDay: boolean): string {
+  if (code === 0) return isDay ? "☀️" : "✨";
+  if (code === 1 || code === 2) return isDay ? "🌤️" : "☁️";
+  if (code === 3) return "☁️";
+  if ([45, 48].includes(code)) return "🌫️";
+  if ([51, 53, 55, 61, 63, 65, 80, 81, 82].includes(code)) return "🌧️";
+  if ([71, 73, 75, 77].includes(code)) return "❄️";
+  if ([95, 96, 99].includes(code)) return "⛈️";
+  return isDay ? "☀️" : "🌙";
 }
