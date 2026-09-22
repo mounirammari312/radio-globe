@@ -91,14 +91,22 @@ export default function RadioGlobe({
   const hoverPopupRef = useRef<any>(null);
   const [ready, setReady] = useState(false);
 
-  // مرجع متزامن وفوري للتحكم في توقف الدوران بمجرد ملامسة الشاشة
+  // حالة مرئية لإضاءة المؤشر عند التقاط محطة
+  const [isLockedOn, setIsLockedOn] = useState(false);
+
+  // مراجع متزامنة للتحكم بالدوران
   const isInteractingRef = useRef<boolean>(false);
   const stopTimerRef = useRef<any>(null);
   const rotateRef = useRef<number | null>(null);
 
-  // مراجع متزامنة لرصد لمس الشاشة بدقة ومنع التكرار المزدوج
+  // مراجع لرصد النقر اللمسي ومؤقت الرادار المركزي
   const touchStartPos = useRef<{ x: number; y: number; time: number } | null>(null);
   const lastTriggerTimeRef = useRef<number>(0);
+  const reticleTuneTimerRef = useRef<any>(null);
+
+  const activePlaceIdRef = useRef(activePlaceId);
+  activePlaceIdRef.current = activePlaceId;
+
   const onPlaceClickRef = useRef(onPlaceClick);
   onPlaceClickRef.current = onPlaceClick;
 
@@ -147,7 +155,6 @@ export default function RadioGlobe({
           maxPitch: 60,
           pitch: 0,
           attributionControl: false,
-          // تفعيل كافة متحكمات اللمس والسحب بإحكام
           dragRotate: true,
           dragPan: true,
           scrollZoom: true,
@@ -186,13 +193,13 @@ export default function RadioGlobe({
           map.setProjection({ type: "globe" } as any);
         } catch {}
 
-        // طبقة النقاط على كرت الشاشة
+        // مصدر بيانات المحطات
         map.addSource("radio-places", {
           type: "geojson",
           data: geojsonData,
         });
 
-        // 1. طبقة استشعار واسعة غير مرئية (Hitbox) لضمان استجابة النقر من أول لمسة على الشاشات اللمسية
+        // 1. طبقة استشعار واسعة غير مرئية (Hitbox) لسهولة النقر
         map.addLayer({
           id: "radio-dots-hitbox",
           type: "circle",
@@ -207,11 +214,11 @@ export default function RadioGlobe({
               8, 30,
             ],
             "circle-color": "#000000",
-            "circle-opacity": 0.001, // غير مرئية للعين إطلاقاً لكنها نشطة برمجياً وتلتقط النقر فوراً
+            "circle-opacity": 0.001,
           },
         });
 
-        // 2. طبقة النقاط المرئية الأصلية بالكامل
+        // 2. طبقة النقاط المرئية الخضراء الأصلية
         map.addLayer({
           id: "radio-dots",
           type: "circle",
@@ -232,7 +239,7 @@ export default function RadioGlobe({
           },
         });
 
-        // النوافذ المنبثقة عند التمرير
+        // النوافذ المنبثقة عند التمرير بالماوس
         const handleMouseEnter = (e: any) => {
           map.getCanvas().style.cursor = "pointer";
           if (!e.features || !e.features[0]) return;
@@ -262,7 +269,7 @@ export default function RadioGlobe({
         map.on("mouseleave", "radio-dots", handleMouseLeave);
         map.on("mouseleave", "radio-dots-hitbox", handleMouseLeave);
 
-        // دالة مركزية لتشغيل المحطة مع حماية مانع التكرار (Debounce)
+        // دالة مركزية لتشغيل المحطة
         const triggerStationClick = (feature: any) => {
           if (!feature || !feature.properties?.raw) return;
           const now = performance.now();
@@ -277,7 +284,7 @@ export default function RadioGlobe({
           }
         };
 
-        // النقر المباشر بالماوس واللمس مع استعلام المربع المحيط (Tolerance Bounding Box)
+        // معالجة النقر المباشر بالماوس واللمس
         const onAnyClick = (e: any) => {
           const tolerance = 16;
           const bbox: [[number, number], [number, number]] = [
@@ -296,6 +303,58 @@ export default function RadioGlobe({
 
         map.on("click", onAnyClick);
 
+        // ----------------------------------------------------
+        // فحص المؤشر المركزي التلقائي (Reticle Tuning Engine)
+        // ----------------------------------------------------
+        const checkStationUnderCrosshair = () => {
+          if (!mapContainer.current) return;
+          const rect = mapContainer.current.getBoundingClientRect();
+          const centerX = rect.width / 2;
+          const centerY = rect.height / 2;
+
+          // فحص منطقة دائرية داخل المؤشر المركزي (قطر 16 بكسل)
+          const radius = 16;
+          const bbox: [[number, number], [number, number]] = [
+            [centerX - radius, centerY - radius],
+            [centerX + radius, centerY + radius],
+          ];
+
+          const features = map.queryRenderedFeatures(bbox, {
+            layers: ["radio-dots-hitbox", "radio-dots"],
+          });
+
+          if (features && features.length > 0) {
+            setIsLockedOn(true);
+            const raw = features[0].properties?.raw;
+            if (raw) {
+              try {
+                const placeObj = JSON.parse(raw);
+                // تشغيل القناة فقط إذا لم تكن هي نفسها المشغلة حالياً
+                if (placeObj.id !== activePlaceIdRef.current) {
+                  const now = performance.now();
+                  if (now - lastTriggerTimeRef.current >= 400) {
+                    lastTriggerTimeRef.current = now;
+                    onPlaceClickRef.current(placeObj);
+                  }
+                }
+              } catch {}
+            }
+          } else {
+            setIsLockedOn(false);
+          }
+        };
+
+        // تفعيل الرصد عند انتهاء أو هدوء حركة الخريطة
+        const scheduleReticleCheck = () => {
+          if (reticleTuneTimerRef.current) clearTimeout(reticleTuneTimerRef.current);
+          reticleTuneTimerRef.current = setTimeout(() => {
+            checkStationUnderCrosshair();
+          }, 250); // تأخير ربع ثانية لضمان ثبات التدوير
+        };
+
+        map.on("move", scheduleReticleCheck);
+        map.on("moveend", checkStationUnderCrosshair);
+
         try {
           map.resize();
         } catch {}
@@ -303,7 +362,9 @@ export default function RadioGlobe({
         setReady(true);
       });
 
-      // إيقاف الدوران فوراً لحظة ملامسة الشاشة
+      // رصد تفاعل اللمس ومستشعر النقر الفوري السريع
+      const canvas = map.getCanvas();
+
       const onUserTouchStart = (e: any) => {
         isInteractingRef.current = true;
         if (stopTimerRef.current) clearTimeout(stopTimerRef.current);
@@ -317,7 +378,6 @@ export default function RadioGlobe({
         }
       };
 
-      // استئناف الدوران بعد 10 ثوانٍ من ترك الشاشة مع مستشعر اللمس الفوري (Fast-Tap)
       const onUserTouchEnd = (e: any) => {
         if (touchStartPos.current && e.changedTouches && e.changedTouches.length === 1 && map) {
           const t = e.changedTouches[0];
@@ -325,7 +385,6 @@ export default function RadioGlobe({
           const dy = Math.abs(t.clientY - touchStartPos.current.y);
           const elapsed = performance.now() - touchStartPos.current.time;
 
-          // إذا كانت اللمسة نقرة سريعة (أقل من 350ms وحركة إصبع أقل من 8 بكسل)
           if (dx < 8 && dy < 8 && elapsed < 350) {
             const rect = canvas.getBoundingClientRect();
             const pointX = t.clientX - rect.left;
@@ -362,7 +421,6 @@ export default function RadioGlobe({
         }, 10000);
       };
 
-      const canvas = map.getCanvas();
       canvas.addEventListener("touchstart", onUserTouchStart, { passive: true });
       canvas.addEventListener("touchend", onUserTouchEnd, { passive: true });
       canvas.addEventListener("mousedown", onUserTouchStart);
@@ -397,6 +455,7 @@ export default function RadioGlobe({
       cancelled = true;
       window.removeEventListener("resize", () => {});
       if (stopTimerRef.current) clearTimeout(stopTimerRef.current);
+      if (reticleTuneTimerRef.current) clearTimeout(reticleTuneTimerRef.current);
       if (resizeObserver) resizeObserver.disconnect();
       if (rotateRef.current) cancelAnimationFrame(rotateRef.current);
       if (hoverPopupRef.current) hoverPopupRef.current.remove();
@@ -407,7 +466,7 @@ export default function RadioGlobe({
     };
   }, []);
 
-  // تحديث نقاط الـ GPU
+  // تحديث نقاط الـ GPU عند تغير البيانات
   useEffect(() => {
     if (!ready || !mapRef.current) return;
     const source = mapRef.current.getSource("radio-places");
@@ -416,7 +475,7 @@ export default function RadioGlobe({
     }
   }, [geojsonData, ready]);
 
-  // حلقة الدوران التلقائي: تفحص المرجع الفوري (isInteractingRef) قبل كل إطار
+  // حلقة الدوران التلقائي
   useEffect(() => {
     if (!ready || !mapRef.current) return;
 
@@ -425,7 +484,6 @@ export default function RadioGlobe({
       const dt = (now - last) / 1000;
       last = now;
 
-      // إذا كان المستخدم يلمس الشاشة، لا نحرك الخريطة برمجياً إطلاقاً
       if (!isInteractingRef.current && mapRef.current) {
         const map = mapRef.current;
         const center = map.getCenter();
@@ -472,10 +530,10 @@ export default function RadioGlobe({
         height: "100%",
         overflow: "hidden",
         backgroundColor: "rgb(8, 4, 30)",
-        touchAction: "none", // منع متصفح الهاتف من اعتراض إيماءات اللمس
+        touchAction: "none",
       }}
     >
-      {/* مؤشر التنشين مع تعطيل التفاعل بالماوس بشكل صريح */}
+      {/* مؤشر التنشين التفاعلي الذكي (يضيء ويتوسع عند التقاط محطة) */}
       <div
         style={{
           position: "absolute",
@@ -484,48 +542,58 @@ export default function RadioGlobe({
           transform: "translate(-50%, -50%)",
           zIndex: 10,
           pointerEvents: "none",
-          opacity: 0.8,
+          opacity: isLockedOn ? 1 : 0.8,
+          transition: "transform 0.2s ease, opacity 0.2s ease",
         }}
       >
-        <div style={{ position: "relative", width: 40, height: 40 }}>
+        <div style={{ position: "relative", width: 44, height: 44 }}>
+          {/* الخط الأفقي */}
           <div
             style={{
               position: "absolute",
               top: "50%",
               left: 0,
               right: 0,
-              height: 1,
-              backgroundColor: "rgb(52, 211, 153)",
+              height: 1.5,
+              backgroundColor: isLockedOn ? "rgb(0, 255, 130)" : "rgb(52, 211, 153)",
+              boxShadow: isLockedOn ? "0 0 8px rgb(0, 255, 130)" : "none",
               transform: "translateY(-50%)",
+              transition: "all 0.2s ease",
             }}
           />
+          {/* الخط العمودي */}
           <div
             style={{
               position: "absolute",
               left: "50%",
               top: 0,
               bottom: 0,
-              width: 1,
-              backgroundColor: "rgb(52, 211, 153)",
+              width: 1.5,
+              backgroundColor: isLockedOn ? "rgb(0, 255, 130)" : "rgb(52, 211, 153)",
+              boxShadow: isLockedOn ? "0 0 8px rgb(0, 255, 130)" : "none",
               transform: "translateX(-50%)",
+              transition: "all 0.2s ease",
             }}
           />
+          {/* حلقة التنشين المركزية */}
           <div
             style={{
               position: "absolute",
               top: "50%",
               left: "50%",
               transform: "translate(-50%, -50%)",
-              width: 10,
-              height: 10,
-              border: "1px solid rgb(52, 211, 153)",
+              width: isLockedOn ? 22 : 14,
+              height: isLockedOn ? 22 : 14,
+              border: `2px solid ${isLockedOn ? "rgb(0, 255, 130)" : "rgb(52, 211, 153)"}`,
+              boxShadow: isLockedOn ? "0 0 12px rgba(0, 255, 130, 0.8)" : "none",
               borderRadius: "50%",
+              transition: "all 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275)",
             }}
           />
         </div>
       </div>
 
-      {/* حاوية الخريطة ثلاثية الأبعاد - تسمح بمرور اللمس بالكامل */}
+      {/* حاوية الخريطة ثلاثية الأبعاد */}
       <div
         ref={mapContainer}
         style={{
@@ -540,7 +608,7 @@ export default function RadioGlobe({
         }}
       />
 
-      {/* الغلاف الجوي الكوني مع تعطيل تفاعل اللمس حتى لا يحجب الخريطة */}
+      {/* الغلاف الجوي الكوني */}
       <div
         style={{
           position: "absolute",
