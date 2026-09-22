@@ -1,3 +1,4 @@
+
 "use client";
 
 import { create } from "zustand";
@@ -47,24 +48,16 @@ interface RadioStore {
   playPrevious: () => void;
 }
 
-// Detect HLS streams (m3u8 endpoints)
+// فحص دقيق وشامل لإذاعات HLS
 function isHlsStream(url: string): boolean {
+  if (!url) return false;
   const u = url.toLowerCase().split("?")[0];
-  return u.endsWith(".m3u8") || u.includes(".m3u8/");
-}
-
-// Build a proxied URL for streams that may have CORS issues.
-// We always route through our proxy for streams that don't have CORS headers.
-// HLS .m3u8 streams MUST be proxied (segments won't load otherwise).
-function maybeProxy(url: string): string {
-  if (!url) return url;
-  if (typeof window === "undefined") return url;
-  if (isHlsStream(url)) {
-    // HLS .m3u8 + segment loads can't be made CORS-safe without a proxy
-    return `/api/proxy?url=${encodeURIComponent(url)}`;
-  }
-  // Direct audio streams: try direct first; the player falls back to proxy on CORS error
-  return url;
+  return (
+    u.endsWith(".m3u8") ||
+    u.includes(".m3u8") ||
+    u.includes("/hls") ||
+    u.includes("m3u8")
+  );
 }
 
 // Lazy load hls.js
@@ -76,7 +69,7 @@ async function loadHls(): Promise<any> {
   return HlsModule;
 }
 
-// MediaSession API setup (lock screen + notification controls)
+// MediaSession API setup (قفل الشاشة ولوحة التحكم في الهاتف)
 function setupMediaSession(
   station: StationMeta,
   handlers: {
@@ -163,7 +156,7 @@ export const useRadioStore = create<RadioStore>((set, get) => ({
     const audio = state.audio;
     if (!audio) return;
 
-    // Cleanup any previous HLS instance
+    // تنظيف أي مشغل HLS سابق
     if (state.hls) {
       try {
         state.hls.destroy();
@@ -182,13 +175,12 @@ export const useRadioStore = create<RadioStore>((set, get) => ({
       ].slice(0, 30),
     });
 
-    // Register click (popularity ranking) — best-effort, non-blocking
+    // تسجيل النقرة للإحصائيات بصمت
     fetch(`/api/click?uuid=${encodeURIComponent(station.id)}`).catch(() => {});
 
     const rawStreamUrl = station.urlResolved || station.url;
     audio.volume = state.isMuted ? 0 : state.volume;
 
-    // Setup MediaSession for lock screen + notification controls
     setupMediaSession(station, {
       play: () => {
         audio
@@ -205,59 +197,93 @@ export const useRadioStore = create<RadioStore>((set, get) => ({
       prev: () => get().playPrevious(),
     });
 
+    // دالة التشغيل الذاتي مع التبديل التلقائي لـ HTTPS لتفادي انقطاع البروكسي
     const startPlayback = (streamUrl: string) => {
-      audio.src = streamUrl;
+      // محاولة ترقية الرابط إلى HTTPS أولاً ليعمل في المتصفح لساعات طويلة دون قيود
+      const secureUrl = streamUrl.startsWith("http://")
+        ? streamUrl.replace(/^http:\/\//i, "https://")
+        : streamUrl;
+
+      audio.src = secureUrl;
       audio
         .play()
         .then(() => {
           set({ isPlaying: true, isLoading: false });
           updateMediaSessionPlaybackState(true);
         })
-        .catch((err) => {
-          console.error("Direct playback failed:", err);
-          // Fallback: try via proxy
-          if (!streamUrl.startsWith("/api/proxy")) {
-            console.log("Retrying via proxy…");
-            audio.src = `/api/proxy?url=${encodeURIComponent(rawStreamUrl)}`;
+        .catch(() => {
+          // إذا فشل الـ HTTPS المباشر، جرب الرابط الأصلي
+          if (secureUrl !== streamUrl) {
+            audio.src = streamUrl;
             audio
               .play()
               .then(() => {
                 set({ isPlaying: true, isLoading: false });
                 updateMediaSessionPlaybackState(true);
               })
-              .catch((err2) => {
-                console.error("Proxy playback also failed:", err2);
-                set({
-                  isLoading: false,
-                  isPlaying: false,
-                  error:
-                    "Unable to play this station. The stream may be offline or restricted.",
-                });
-              });
+              .catch(() => tryProxyFallback());
           } else {
-            set({
-              isLoading: false,
-              isPlaying: false,
-              error: "Stream unavailable. Try another station.",
-            });
+            tryProxyFallback();
           }
         });
+
+      function tryProxyFallback() {
+        if (!streamUrl.startsWith("/api/proxy")) {
+          audio.src = `/api/proxy?url=${encodeURIComponent(rawStreamUrl)}`;
+          audio
+            .play()
+            .then(() => {
+              set({ isPlaying: true, isLoading: false });
+              updateMediaSessionPlaybackState(true);
+            })
+            .catch((err2) => {
+              console.error("Playback failed completely:", err2);
+              set({
+                isLoading: false,
+                isPlaying: false,
+                error: "Unable to play this station. The stream may be offline or restricted.",
+              });
+            });
+        } else {
+          set({
+            isLoading: false,
+            isPlaying: false,
+            error: "Stream unavailable. Try another station.",
+          });
+        }
+      }
     };
 
     if (isHlsStream(rawStreamUrl)) {
-      // Use hls.js for HLS streams (.m3u8) — HLS needs special handling
       loadHls()
         .then((Hls) => {
           if (Hls.isSupported()) {
+            // محمل ذكي يقوم بحل مسارات أجزاء الصوت النسبية عبر البروكسي دون الوقوع في خطأ 404
+            class ProxyHlsLoader extends Hls.DefaultConfig.loader {
+              load(context: any, config: any, callbacks: any) {
+                const target = context.url;
+                if (
+                  target &&
+                  !target.startsWith("/api/proxy") &&
+                  !target.startsWith(window.location.origin)
+                ) {
+                  context.url = `/api/proxy?url=${encodeURIComponent(target)}`;
+                }
+                super.load(context, config, callbacks);
+              }
+            }
+
             const hls = new Hls({
               enableWorker: true,
               lowLatencyMode: true,
               liveDurationInfinity: true,
+              loader: ProxyHlsLoader as any,
             });
-            // Route through our proxy to bypass CORS on HLS segments
-            hls.config.loaderConfig = hls.config.loaderConfig || {};
-            hls.loadSource(`/api/proxy?url=${encodeURIComponent(rawStreamUrl)}`);
+
+            // تمرير الرابط الأصلي الكامل ليتعرف Hls.js على المسار الأساسي الصحيح
+            hls.loadSource(rawStreamUrl);
             hls.attachMedia(audio);
+
             hls.on(Hls.Events.MANIFEST_PARSED, () => {
               audio
                 .play()
@@ -274,6 +300,7 @@ export const useRadioStore = create<RadioStore>((set, get) => ({
                   });
                 });
             });
+
             hls.on(Hls.Events.ERROR, (_: any, data: any) => {
               if (data.fatal) {
                 console.error("HLS fatal error:", data);
@@ -288,12 +315,12 @@ export const useRadioStore = create<RadioStore>((set, get) => ({
                 updateMediaSessionPlaybackState(false);
               }
             });
+
             set({ hls });
           } else if (audio.canPlayType("application/vnd.apple.mpegurl")) {
-            // Safari native HLS — also via proxy for CORS
+            // Safari
             startPlayback(`/api/proxy?url=${encodeURIComponent(rawStreamUrl)}`);
           } else {
-            // Last resort: direct
             startPlayback(rawStreamUrl);
           }
         })
@@ -302,7 +329,7 @@ export const useRadioStore = create<RadioStore>((set, get) => ({
           startPlayback(rawStreamUrl);
         });
     } else {
-      // Direct audio (mp3/aac/ogg) — try direct first, fall back to proxy
+      // الإذاعات القياسية المباشرة (mp3/aac)
       startPlayback(rawStreamUrl);
     }
   },
@@ -395,7 +422,6 @@ export const useRadioStore = create<RadioStore>((set, get) => ({
   playNext: () => {
     const state = get();
     if (state.history.length < 2) return;
-    // Find current index in history, go to next
     const currentIdx = state.history.findIndex(
       (h) => h.id === state.currentStation?.id
     );
