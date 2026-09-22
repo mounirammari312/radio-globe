@@ -1,23 +1,9 @@
+
 import { NextRequest } from "next/server";
 
-/**
- * Audio stream proxy: bypasses CORS restrictions by proxying radio streams
- * through our own server with proper Access-Control-Allow-Origin headers.
- *
- * Usage: GET /api/proxy?url=https://stream.example.com/live.mp3
- *
- * The proxy:
- *  - Forwards the audio stream directly (no buffering) — low memory footprint.
- *  - Sets CORS headers so the browser allows playback.
- *  - Passes Range requests for HLS (.m3u8 / .ts segments) and audio seeking.
- *  - Has a 25-second max duration for Vercel Hobby plan.
- *
- * This is used as a fallback by the audio player when direct playback fails
- * due to CORS restrictions on the original stream.
- */
-
 export const dynamic = "force-dynamic";
-export const runtime = "nodejs";
+// استخدام بيئة Edge الفائقة التي تدعم البث المباشر المستمر وتتفادى مهلة السيرفر المحدودة
+export const runtime = "edge";
 
 const BLOCKED_HEADERS = new Set([
   "host",
@@ -56,8 +42,14 @@ export async function GET(request: NextRequest) {
     const reqHeaders = new Headers();
     const range = request.headers.get("range");
     if (range) reqHeaders.set("Range", range);
-    reqHeaders.set("User-Agent", "RadioGardenClone/1.0");
+
+    // ترويسة متصفح نظامية لمنع شبكات Akamai و Cloudflare من حظر البث
+    reqHeaders.set(
+      "User-Agent",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    );
     reqHeaders.set("Accept", "*/*");
+    reqHeaders.set("Accept-Language", "en-US,en;q=0.9");
 
     const upstream = await fetch(parsedUrl.toString(), {
       headers: reqHeaders,
