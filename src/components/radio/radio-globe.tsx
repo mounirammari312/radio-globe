@@ -96,6 +96,12 @@ export default function RadioGlobe({
   const stopTimerRef = useRef<any>(null);
   const rotateRef = useRef<number | null>(null);
 
+  // مراجع متزامنة لرصد لمس الشاشة بدقة ومنع التكرار المزدوج
+  const touchStartPos = useRef<{ x: number; y: number; time: number } | null>(null);
+  const lastTriggerTimeRef = useRef<number>(0);
+  const onPlaceClickRef = useRef(onPlaceClick);
+  onPlaceClickRef.current = onPlaceClick;
+
   const geojsonData = useMemo(() => {
     return {
       type: "FeatureCollection",
@@ -186,6 +192,26 @@ export default function RadioGlobe({
           data: geojsonData,
         });
 
+        // 1. طبقة استشعار واسعة غير مرئية (Hitbox) لضمان استجابة النقر من أول لمسة على الشاشات اللمسية
+        map.addLayer({
+          id: "radio-dots-hitbox",
+          type: "circle",
+          source: "radio-places",
+          paint: {
+            "circle-radius": [
+              "interpolate",
+              ["linear"],
+              ["zoom"],
+              1.5, 18,
+              4, 24,
+              8, 30,
+            ],
+            "circle-color": "#000000",
+            "circle-opacity": 0.001, // غير مرئية للعين إطلاقاً لكنها نشطة برمجياً وتلتقط النقر فوراً
+          },
+        });
+
+        // 2. طبقة النقاط المرئية الأصلية بالكامل
         map.addLayer({
           id: "radio-dots",
           type: "circle",
@@ -207,7 +233,7 @@ export default function RadioGlobe({
         });
 
         // النوافذ المنبثقة عند التمرير
-        map.on("mouseenter", "radio-dots", (e: any) => {
+        const handleMouseEnter = (e: any) => {
           map.getCanvas().style.cursor = "pointer";
           if (!e.features || !e.features[0]) return;
           const feat = e.features[0];
@@ -223,21 +249,52 @@ export default function RadioGlobe({
               </div>`
             )
             .addTo(map);
-        });
+        };
 
-        map.on("mouseleave", "radio-dots", () => {
+        map.on("mouseenter", "radio-dots", handleMouseEnter);
+        map.on("mouseenter", "radio-dots-hitbox", handleMouseEnter);
+
+        const handleMouseLeave = () => {
           map.getCanvas().style.cursor = "";
           hoverPopup.remove();
-        });
+        };
 
-        map.on("click", "radio-dots", (e: any) => {
-          if (!e.features || !e.features[0]) return;
-          const raw = e.features[0].properties.raw;
-          if (raw) {
-            const placeObj = JSON.parse(raw);
-            onPlaceClick(placeObj);
+        map.on("mouseleave", "radio-dots", handleMouseLeave);
+        map.on("mouseleave", "radio-dots-hitbox", handleMouseLeave);
+
+        // دالة مركزية لتشغيل المحطة مع حماية مانع التكرار (Debounce)
+        const triggerStationClick = (feature: any) => {
+          if (!feature || !feature.properties?.raw) return;
+          const now = performance.now();
+          if (now - lastTriggerTimeRef.current < 400) return;
+          lastTriggerTimeRef.current = now;
+
+          try {
+            const placeObj = JSON.parse(feature.properties.raw);
+            onPlaceClickRef.current(placeObj);
+          } catch (err) {
+            console.error("Failed to parse place data", err);
           }
-        });
+        };
+
+        // النقر المباشر بالماوس واللمس مع استعلام المربع المحيط (Tolerance Bounding Box)
+        const onAnyClick = (e: any) => {
+          const tolerance = 16;
+          const bbox: [[number, number], [number, number]] = [
+            [e.point.x - tolerance, e.point.y - tolerance],
+            [e.point.x + tolerance, e.point.y + tolerance],
+          ];
+
+          const features = map.queryRenderedFeatures(bbox, {
+            layers: ["radio-dots-hitbox", "radio-dots"],
+          });
+
+          if (features && features.length > 0) {
+            triggerStationClick(features[0]);
+          }
+        };
+
+        map.on("click", onAnyClick);
 
         try {
           map.resize();
@@ -247,13 +304,58 @@ export default function RadioGlobe({
       });
 
       // إيقاف الدوران فوراً لحظة ملامسة الشاشة
-      const onUserTouchStart = () => {
+      const onUserTouchStart = (e: any) => {
         isInteractingRef.current = true;
         if (stopTimerRef.current) clearTimeout(stopTimerRef.current);
+
+        if (e.touches && e.touches.length === 1) {
+          touchStartPos.current = {
+            x: e.touches[0].clientX,
+            y: e.touches[0].clientY,
+            time: performance.now(),
+          };
+        }
       };
 
-      // استئناف الدوران بعد 10 ثوانٍ من ترك الشاشة
-      const onUserTouchEnd = () => {
+      // استئناف الدوران بعد 10 ثوانٍ من ترك الشاشة مع مستشعر اللمس الفوري (Fast-Tap)
+      const onUserTouchEnd = (e: any) => {
+        if (touchStartPos.current && e.changedTouches && e.changedTouches.length === 1 && map) {
+          const t = e.changedTouches[0];
+          const dx = Math.abs(t.clientX - touchStartPos.current.x);
+          const dy = Math.abs(t.clientY - touchStartPos.current.y);
+          const elapsed = performance.now() - touchStartPos.current.time;
+
+          // إذا كانت اللمسة نقرة سريعة (أقل من 350ms وحركة إصبع أقل من 8 بكسل)
+          if (dx < 8 && dy < 8 && elapsed < 350) {
+            const rect = canvas.getBoundingClientRect();
+            const pointX = t.clientX - rect.left;
+            const pointY = t.clientY - rect.top;
+
+            const tolerance = 18;
+            const bbox: [[number, number], [number, number]] = [
+              [pointX - tolerance, pointY - tolerance],
+              [pointX + tolerance, pointY + tolerance],
+            ];
+
+            const features = map.queryRenderedFeatures(bbox, {
+              layers: ["radio-dots-hitbox", "radio-dots"],
+            });
+
+            if (features && features.length > 0) {
+              const now = performance.now();
+              if (now - lastTriggerTimeRef.current >= 400) {
+                lastTriggerTimeRef.current = now;
+                try {
+                  const placeObj = JSON.parse(features[0].properties.raw);
+                  onPlaceClickRef.current(placeObj);
+                } catch {}
+              }
+            }
+          }
+        }
+
+        touchStartPos.current = null;
+
         if (stopTimerRef.current) clearTimeout(stopTimerRef.current);
         stopTimerRef.current = setTimeout(() => {
           isInteractingRef.current = false;
