@@ -99,7 +99,9 @@ export default function RadioGlobe({
   const stopTimerRef = useRef<any>(null);
   const rotateRef = useRef<number | null>(null);
 
-  // مراجع لرصد النقر اللمسي ومؤقت الرادار المركزي
+  // مراجع لضبط استقرار الرادار وفصل الطيران عن السحب اليدوي
+  const isFlyingRef = useRef<boolean>(false);
+  const userDragOccurredRef = useRef<boolean>(false);
   const touchStartPos = useRef<{ x: number; y: number; time: number } | null>(null);
   const lastTriggerTimeRef = useRef<number>(0);
   const reticleTuneTimerRef = useRef<any>(null);
@@ -284,7 +286,7 @@ export default function RadioGlobe({
           }
         };
 
-        // معالجة النقر المباشر بالماوس واللمس
+        // معالجة النقر المباشر بالماوس واللمس مع نطاق تسامح
         const onAnyClick = (e: any) => {
           const tolerance = 16;
           const bbox: [[number, number], [number, number]] = [
@@ -303,17 +305,18 @@ export default function RadioGlobe({
 
         map.on("click", onAnyClick);
 
-        // ----------------------------------------------------
-        // فحص المؤشر المركزي التلقائي (Reticle Tuning Engine)
-        // ----------------------------------------------------
+        // -----------------------------------------------------------------
+        // فحص المؤشر المركزي الذكي: يعمل فقط عند السحب اليدوي التام والاستقرار
+        // -----------------------------------------------------------------
         const checkStationUnderCrosshair = () => {
-          if (!mapContainer.current) return;
+          // منع الرصد تماماً أثناء الطيران الآلي، أو إذا لم يكن هناك سحب يدوي
+          if (isFlyingRef.current || !userDragOccurredRef.current || !mapContainer.current) return;
+
           const rect = mapContainer.current.getBoundingClientRect();
           const centerX = rect.width / 2;
           const centerY = rect.height / 2;
 
-          // فحص منطقة دائرية داخل المؤشر المركزي (قطر 16 بكسل)
-          const radius = 16;
+          const radius = 18;
           const bbox: [[number, number], [number, number]] = [
             [centerX - radius, centerY - radius],
             [centerX + radius, centerY + radius],
@@ -329,31 +332,33 @@ export default function RadioGlobe({
             if (raw) {
               try {
                 const placeObj = JSON.parse(raw);
-                // تشغيل القناة فقط إذا لم تكن هي نفسها المشغلة حالياً
                 if (placeObj.id !== activePlaceIdRef.current) {
                   const now = performance.now();
                   if (now - lastTriggerTimeRef.current >= 400) {
                     lastTriggerTimeRef.current = now;
+                    userDragOccurredRef.current = false; // تم التثبيت بنجاح
                     onPlaceClickRef.current(placeObj);
                   }
                 }
-              } catch {}
+              } catch (err) {
+                console.error("Failed to tune to station", err);
+              }
             }
           } else {
             setIsLockedOn(false);
           }
         };
 
-        // تفعيل الرصد عند انتهاء أو هدوء حركة الخريطة
+        // جدولة الفحص عند هدوء السحب باليد
         const scheduleReticleCheck = () => {
+          if (isFlyingRef.current || !userDragOccurredRef.current) return;
           if (reticleTuneTimerRef.current) clearTimeout(reticleTuneTimerRef.current);
           reticleTuneTimerRef.current = setTimeout(() => {
             checkStationUnderCrosshair();
-          }, 250); // تأخير ربع ثانية لضمان ثبات التدوير
+          }, 350);
         };
 
         map.on("move", scheduleReticleCheck);
-        map.on("moveend", checkStationUnderCrosshair);
 
         try {
           map.resize();
@@ -362,7 +367,6 @@ export default function RadioGlobe({
         setReady(true);
       });
 
-      // رصد تفاعل اللمس ومستشعر النقر الفوري السريع
       const canvas = map.getCanvas();
 
       const onUserTouchStart = (e: any) => {
@@ -379,6 +383,7 @@ export default function RadioGlobe({
       };
 
       const onUserTouchEnd = (e: any) => {
+        // فحص النقر السريع باللمس المباشر
         if (touchStartPos.current && e.changedTouches && e.changedTouches.length === 1 && map) {
           const t = e.changedTouches[0];
           const dx = Math.abs(t.clientX - touchStartPos.current.x);
@@ -426,7 +431,13 @@ export default function RadioGlobe({
       canvas.addEventListener("mousedown", onUserTouchStart);
       canvas.addEventListener("mouseup", onUserTouchEnd);
 
-      map.on("dragstart", onUserTouchStart);
+      // تتبع سحب المستخدم باليد بدقة
+      map.on("dragstart", () => {
+        onUserTouchStart({ touches: [] });
+        userDragOccurredRef.current = true;
+        setIsLockedOn(false);
+      });
+
       map.on("dragend", onUserTouchEnd);
       map.on("zoomstart", onUserTouchStart);
       map.on("zoomend", onUserTouchEnd);
@@ -434,6 +445,36 @@ export default function RadioGlobe({
       map.on("moveend", () => {
         const center = map.getCenter();
         onCenterChange?.(center.lat, center.lng);
+
+        // إذا كان التحريك نتيجة سحب يدوي وانتهت الحركة تماماً
+        if (!isFlyingRef.current && userDragOccurredRef.current) {
+          if (reticleTuneTimerRef.current) clearTimeout(reticleTuneTimerRef.current);
+          reticleTuneTimerRef.current = setTimeout(() => {
+            if (!isFlyingRef.current && userDragOccurredRef.current && mapContainer.current) {
+              const rect = mapContainer.current.getBoundingClientRect();
+              const centerX = rect.width / 2;
+              const centerY = rect.height / 2;
+              const radius = 18;
+              const bbox: [[number, number], [number, number]] = [
+                [centerX - radius, centerY - radius],
+                [centerX + radius, centerY + radius],
+              ];
+              const features = map.queryRenderedFeatures(bbox, {
+                layers: ["radio-dots-hitbox", "radio-dots"],
+              });
+              if (features && features.length > 0 && features[0].properties?.raw) {
+                try {
+                  const placeObj = JSON.parse(features[0].properties.raw);
+                  if (placeObj.id !== activePlaceIdRef.current) {
+                    userDragOccurredRef.current = false;
+                    setIsLockedOn(true);
+                    onPlaceClickRef.current(placeObj);
+                  }
+                } catch {}
+              }
+            }
+          }, 250);
+        }
       });
 
       const handleResize = () => {
@@ -475,7 +516,7 @@ export default function RadioGlobe({
     }
   }, [geojsonData, ready]);
 
-  // حلقة الدوران التلقائي
+  // حلقة الدوران التلقائي الهادئ (لا تلتقط المحطات إطلاقاً لضمان عدم إزعاج المستمع)
   useEffect(() => {
     if (!ready || !mapRef.current) return;
 
@@ -503,19 +544,41 @@ export default function RadioGlobe({
     };
   }, [ready]);
 
-  // الطيران إلى المحطة عند الاختيار
+  // الطيران إلى المحطة مع تجميد الرادار طوال مسار الرحلة الجوية
   useEffect(() => {
     if (!ready || !mapRef.current || !activePlaceId) return;
     const place = places.find((p) => p.id === activePlaceId);
     if (!place) return;
-    
+
+    const map = mapRef.current;
+
+    // تفعيل وضع الطيران لمنع الرادار من التقاط أي محطة وسيطة في الطريق
+    isFlyingRef.current = true;
+    userDragOccurredRef.current = false;
     isInteractingRef.current = true;
-    mapRef.current.flyTo({
+    setIsLockedOn(true);
+
+    if (stopTimerRef.current) clearTimeout(stopTimerRef.current);
+
+    map.flyTo({
       center: [place.lng, place.lat],
       zoom: 4.5,
       duration: 1200,
       essential: true,
     });
+
+    const onFlyComplete = () => {
+      map.off("moveend", onFlyComplete);
+      setTimeout(() => {
+        isFlyingRef.current = false;
+        if (stopTimerRef.current) clearTimeout(stopTimerRef.current);
+        stopTimerRef.current = setTimeout(() => {
+          isInteractingRef.current = false;
+        }, 10000);
+      }, 200);
+    };
+
+    map.on("moveend", onFlyComplete);
   }, [activePlaceId, places, ready]);
 
   return (
@@ -533,7 +596,7 @@ export default function RadioGlobe({
         touchAction: "none",
       }}
     >
-      {/* مؤشر التنشين التفاعلي الذكي (يضيء ويتوسع عند التقاط محطة) */}
+      {/* مؤشر التنشين التفاعلي الذكي */}
       <div
         style={{
           position: "absolute",
